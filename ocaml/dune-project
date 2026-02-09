@@ -1,0 +1,19 @@
+(lang dune 3.0)
+(name elite_quant)
+(version 1.0.0)
+
+(generate_opam_files true)
+
+(authors "Elite Quant Team")
+(maintainers "Elite Quant Team")
+
+(package
+ (name elite_quant)
+ (synopsis "OCaml trading system core")
+ (description "Functional trading system implementation")
+ (depends
+  (ocaml (>= 4.14))
+  core
+  core_unix
+  ppx_jane))
+

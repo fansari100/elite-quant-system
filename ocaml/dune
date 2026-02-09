@@ -1,0 +1,6 @@
+(executable
+ (name trading_core)
+ (public_name elite_quant)
+ (libraries core core_unix)
+ (preprocess (pps ppx_jane)))
+

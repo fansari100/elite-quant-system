@@ -1,0 +1,190 @@
+# Elite Quant System - Docker Compose
+# ====================================
+# Full stack deployment with monitoring
+
+version: '3.9'
+
+services:
+  # ===========================================================================
+  # Core Services
+  # ===========================================================================
+  
+  # Main application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+    container_name: elite-quant-app
+    volumes:
+      - ./data_cache:/app/data_cache
+      - ./checkpoints:/app/checkpoints
+      - ./logs:/app/logs
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - quant-network
+
+  # API Server
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+    container_name: elite-quant-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - redis
+      - kdb
+    networks:
+      - quant-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # Data Services
+  # ===========================================================================
+  
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: elite-quant-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - quant-network
+
+  # KDB+ Time Series Database (placeholder - requires license)
+  kdb:
+    image: alpine:latest
+    container_name: elite-quant-kdb
+    command: echo "KDB+ requires a commercial license. Use local q installation."
+    networks:
+      - quant-network
+
+  # PostgreSQL for metadata and results
+  postgres:
+    image: postgres:16-alpine
+    container_name: elite-quant-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=quant
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-quant_secret}
+      - POSTGRES_DB=elite_quant
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - quant-network
+
+  # ===========================================================================
+  # Monitoring Stack
+  # ===========================================================================
+  
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: elite-quant-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - quant-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: elite-quant-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    networks:
+      - quant-network
+
+  # Node Exporter for system metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: elite-quant-node-exporter
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.ignored-mount-points=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - quant-network
+
+  # cAdvisor for container metrics
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: elite-quant-cadvisor
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks:
+      - quant-network
+
+# ===========================================================================
+# Networks and Volumes
+# ===========================================================================
+
+networks:
+  quant-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+

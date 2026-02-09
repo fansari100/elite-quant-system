@@ -1,0 +1,485 @@
+# Elite Quant System - Kubernetes Deployment Manifests
+# Production-grade orchestration for quantitative trading
+# Used by Two Sigma, Citadel for scalable microservices
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: elite-quant
+  labels:
+    app: elite-quant-system
+
+---
+# ConfigMap for system configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quant-config
+  namespace: elite-quant
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  REDIS_HOST: "redis-master"
+  REDIS_PORT: "6379"
+  KDB_HOST: "kdb-service"
+  KDB_PORT: "5000"
+  FEATURE_STORE_HOST: "feast-server"
+  MODEL_BATCH_SIZE: "64"
+  MAX_POSITION_SIZE: "1000000"
+  RISK_CHECK_ENABLED: "true"
+
+---
+# Secret for sensitive credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: quant-secrets
+  namespace: elite-quant
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "CHANGE_ME_IN_PRODUCTION"
+  API_KEY: "CHANGE_ME_IN_PRODUCTION"
+  KDB_AUTH: "CHANGE_ME_IN_PRODUCTION"
+
+---
+# AI Inference Service - GPU-enabled
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-inference
+  namespace: elite-quant
+  labels:
+    app: ai-inference
+    tier: ml
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ai-inference
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: ai-inference
+        tier: ml
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.product: "NVIDIA-H200"  # Target H200 GPUs
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      containers:
+        - name: inference
+          image: elite-quant/ai-inference:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 9090
+              name: metrics
+          resources:
+            requests:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "64Gi"
+              cpu: "16"
+              nvidia.com/gpu: "1"
+          envFrom:
+            - configMapRef:
+                name: quant-config
+            - secretRef:
+                name: quant-secrets
+          env:
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: TORCH_CUDA_ARCH_LIST
+              value: "9.0"  # H200 Hopper architecture
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache-pvc
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+
+---
+# Go Gateway Service - Ultra-low latency
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: elite-quant
+  labels:
+    app: gateway
+    tier: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+        tier: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: gateway
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: gateway
+          image: elite-quant/gateway:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 9090
+              name: metrics
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2"
+          envFrom:
+            - configMapRef:
+                name: quant-config
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 3
+
+---
+# Rust Execution Engine - Performance critical
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: execution-engine
+  namespace: elite-quant
+  labels:
+    app: execution-engine
+    tier: execution
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: execution-engine
+  template:
+    metadata:
+      labels:
+        app: execution-engine
+        tier: execution
+    spec:
+      priorityClassName: high-priority
+      containers:
+        - name: execution
+          image: elite-quant/execution-engine:latest
+          ports:
+            - containerPort: 8081
+              name: grpc
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "2"
+            limits:
+              memory: "4Gi"
+              cpu: "4"
+          envFrom:
+            - configMapRef:
+                name: quant-config
+            - secretRef:
+                name: quant-secrets
+
+---
+# Feature Store Server (Feast)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: feast-server
+  namespace: elite-quant
+  labels:
+    app: feast-server
+    tier: data
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: feast-server
+  template:
+    metadata:
+      labels:
+        app: feast-server
+        tier: data
+    spec:
+      containers:
+        - name: feast
+          image: feastdev/feature-server:latest
+          ports:
+            - containerPort: 6566
+              name: grpc
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "4"
+          volumeMounts:
+            - name: feast-repo
+              mountPath: /feature_repo
+      volumes:
+        - name: feast-repo
+          configMap:
+            name: feast-config
+
+---
+# Redis for caching and real-time data
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-master
+  namespace: elite-quant
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "2"
+          command:
+            - redis-server
+            - --maxmemory
+            - 4gb
+            - --maxmemory-policy
+            - allkeys-lru
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+
+---
+# Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-inference
+  namespace: elite-quant
+spec:
+  selector:
+    app: ai-inference
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: elite-quant
+spec:
+  selector:
+    app: gateway
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  type: LoadBalancer
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: execution-engine
+  namespace: elite-quant
+spec:
+  selector:
+    app: execution-engine
+  ports:
+    - port: 8081
+      targetPort: 8081
+      name: grpc
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: feast-server
+  namespace: elite-quant
+spec:
+  selector:
+    app: feast-server
+  ports:
+    - port: 6566
+      targetPort: 6566
+      name: grpc
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+  namespace: elite-quant
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: ClusterIP
+
+---
+# Horizontal Pod Autoscaler for AI Inference
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ai-inference-hpa
+  namespace: elite-quant
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ai-inference
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Pods
+      pods:
+        metric:
+          name: inference_latency_p99
+        target:
+          type: AverageValue
+          averageValue: "100m"
+
+---
+# PriorityClass for critical workloads
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+value: 1000000
+globalDefault: false
+description: "High priority for trading execution workloads"
+
+---
+# PersistentVolumeClaim for model cache
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache-pvc
+  namespace: elite-quant
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd
+
+---
+# NetworkPolicy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: quant-network-policy
+  namespace: elite-quant
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: elite-quant
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: elite-quant
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+

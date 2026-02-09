@@ -1,0 +1,65 @@
+[package]
+name = "elite-quant-execution"
+version = "1.0.0"
+edition = "2021"
+authors = ["Elite Quant Team"]
+description = "Memory-safe, low-latency trading execution engine in Rust"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Networking
+tungstenite = "0.21"
+tokio-tungstenite = "0.21"
+reqwest = { version = "0.11", features = ["json"] }
+
+# Concurrency
+crossbeam = "0.8"
+parking_lot = "0.12"
+dashmap = "5.5"
+
+# Time and dates
+chrono = { version = "0.4", features = ["serde"] }
+
+# Numerical
+ndarray = "0.15"
+statrs = "0.16"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Configuration
+config = "0.14"
+dotenv = "0.15"
+
+# FFI for Python bindings
+pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+
+[features]
+default = []
+python = ["pyo3"]
+
+[lib]
+name = "elite_quant"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "execution_server"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
+
